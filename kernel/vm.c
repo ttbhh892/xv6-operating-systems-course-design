@@ -303,29 +303,43 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
+
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
+
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+
+    // 原来可写的页面改成只读 COW 页面。
+    if(*pte & PTE_W){
+      *pte = (*pte & ~PTE_W) | PTE_COW;
     }
+
+    flags = PTE_FLAGS(*pte);
+
+    // 子进程直接映射父进程的同一个物理页。
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+
+    // 该物理页现在又多了一个引用。
+    kaddref(pa);
   }
+
+  // 清除父进程可能缓存的旧可写页表项。
+  sfence_vma();
+
   return 0;
 
- err:
+err:
+  // do_free=1 会调用 kfree()，引用数减一。
   uvmunmap(new, 0, i / PGSIZE, 1);
+  sfence_vma();
   return -1;
 }
+
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
