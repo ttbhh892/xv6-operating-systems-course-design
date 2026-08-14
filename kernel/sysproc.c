@@ -77,10 +77,44 @@ sys_sleep(void)
 
 
 #ifdef LAB_PGTBL
-int
+uint64
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 start;
+  uint64 user_mask;
+  int npages;
+  uint mask = 0;
+  pte_t *pte;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &start) < 0)
+    return -1;
+
+  if(argint(1, &npages) < 0)
+    return -1;
+
+  if(argaddr(2, &user_mask) < 0)
+    return -1;
+
+  // mask 是 32 位，每个页面使用一位
+  if(npages < 0 || npages > 32)
+    return -1;
+
+  for(int i = 0; i < npages; i++){
+    pte = walk(p->pagetable, start + i * PGSIZE, 0);
+
+    if(pte != 0 && (*pte & PTE_V) && (*pte & PTE_A)){
+      mask |= (1U << i);
+
+      // 清除访问位，使下一次调用能检测新的访问
+      *pte &= ~PTE_A;
+    }
+  }
+
+  if(copyout(p->pagetable, user_mask,
+             (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
   return 0;
 }
 #endif
