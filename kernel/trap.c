@@ -51,27 +51,32 @@ usertrap(void)
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
-    // system call
+  // system call
 
-    if(p->killed)
-      exit(-1);
+  if(p->killed)
+    exit(-1);
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+  p->trapframe->epc += 4;
 
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
-    intr_on();
+  intr_on();
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+  syscall();
+} else if(r_scause() == 15){
+  // 15 表示用户态 Store/AMO page fault，即写页面异常。
+  uint64 va = r_stval();
+
+  if(va >= p->sz || cowalloc(p->pagetable, va) < 0)
     p->killed = 1;
-  }
+
+} else if((which_dev = devintr()) != 0){
+  // ok
+} else {
+  printf("usertrap(): unexpected scause %p pid=%d\n",
+         r_scause(), p->pid);
+  printf("            sepc=%p stval=%p\n",
+         r_sepc(), r_stval());
+  p->killed = 1;
+}
 
   if(p->killed)
     exit(-1);

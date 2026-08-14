@@ -340,6 +340,58 @@ err:
   return -1;
 }
 
+// 处理对 COW 页面的写入。
+// 成功返回 0，失败返回 -1。
+int
+cowalloc(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+  if(va >= MAXVA)
+    return -1;
+
+  va = PGROUNDDOWN(va);
+
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+
+  // 必须是有效的用户 COW 页面。
+  if((*pte & PTE_V) == 0 ||
+     (*pte & PTE_U) == 0 ||
+     (*pte & PTE_COW) == 0)
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  flags = (flags | PTE_W) & ~PTE_COW;
+
+  // 如果只有当前进程引用它，就不需要复制。
+  if(kgetref(pa) == 1){
+    *pte = PA2PTE(pa) | flags;
+    sfence_vma();
+    return 0;
+  }
+
+  // 多个进程共享页面，分配并复制一个新页面。
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  memmove(mem, (char*)pa, PGSIZE);
+
+  // 将当前进程的页表项指向新页面，并恢复写权限。
+  *pte = PA2PTE((uint64)mem) | flags;
+  sfence_vma();
+
+  // 当前进程不再引用旧页面。
+  kfree((void*)pa);
+
+  return 0;
+}
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
