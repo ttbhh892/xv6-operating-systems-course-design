@@ -432,3 +432,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+static void
+vmprintwalk(pagetable_t pagetable, int depth)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+
+    if((pte & PTE_V) == 0)
+      continue;
+
+    for(int j = 0; j < depth; j++)
+      printf(" ..");
+
+    uint64 pa = PTE2PA(pte);
+    printf("%d: pte %p pa %p\n", i, pte, pa);
+
+    // 没有 R/W/X 权限，说明该项指向下一级页表
+    if((pte & (PTE_R | PTE_W | PTE_X)) == 0)
+      vmprintwalk((pagetable_t)pa, depth + 1);
+  }
+}
+
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprintwalk(pagetable, 1);
+}
+
