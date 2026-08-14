@@ -380,23 +380,63 @@ bmap(struct inode *ip, uint bn)
   uint addr, *a;
   struct buf *bp;
 
+  // 直接块。
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
+
   bn -= NDIRECT;
 
+  // 一级间接块。
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
+
     if((addr = a[bn]) == 0){
       a[bn] = addr = balloc(ip->dev);
       log_write(bp);
     }
+
+    brelse(bp);
+    return addr;
+  }
+
+  bn -= NINDIRECT;
+
+  // 二级间接块。
+  if(bn < NDOUBLE){
+    uint first = bn / NINDIRECT;
+    uint second = bn % NINDIRECT;
+
+    // 分配二级间接根块。
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+
+    // 根块中的元素指向一级间接块。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    if((addr = a[first]) == 0){
+      a[first] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+
+    brelse(bp);
+
+    // 一级间接块中的元素指向数据块。
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    if((addr = a[second]) == 0){
+      a[second] = addr = balloc(ip->dev);
+      log_write(bp);
+    }
+
     brelse(bp);
     return addr;
   }
@@ -410,9 +450,10 @@ void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2;
+  uint *a, *a2;
 
+  // 释放直接数据块。
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -420,16 +461,53 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 释放一级间接块及其指向的数据块。
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
+
     for(j = 0; j < NINDIRECT; j++){
       if(a[j])
         bfree(ip->dev, a[j]);
     }
+
     brelse(bp);
+
+    // 释放一级间接块本身。
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 释放二级间接块。
+  if(ip->addrs[NDIRECT+1]){
+    // bp 是二级间接根块。
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        // bp2 是二级根块指向的一级间接块。
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+
+        // 释放一级间接块指向的所有数据块。
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+
+        brelse(bp2);
+
+        // 释放该一级间接块本身。
+        bfree(ip->dev, a[i]);
+      }
+    }
+
+    brelse(bp);
+
+    // 释放二级间接根块本身。
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
