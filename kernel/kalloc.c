@@ -23,10 +23,22 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct {
+  struct spinlock lock;
+  int count[PHYSTOP / PGSIZE];
+} ref;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  initlock(&ref.lock, "ref");
+
+  for(char *p = (char*)PGROUNDUP((uint64)end);
+      p + PGSIZE <= (char*)PHYSTOP;
+      p += PGSIZE)
+    ref.count[(uint64)p / PGSIZE] = 1;
+
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -50,6 +62,23 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+    // 当前物理页的引用数量减一。
+  acquire(&ref.lock);
+
+  if(ref.count[(uint64)pa / PGSIZE] < 1)
+    panic("kfree ref");
+
+  ref.count[(uint64)pa / PGSIZE]--;
+
+  // 还有其他页表引用这个物理页，暂时不能释放。
+  if(ref.count[(uint64)pa / PGSIZE] > 0) {
+    release(&ref.lock);
+    return;
+  }
+
+  release(&ref.lock);
+
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -76,7 +105,31 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+   acquire(&ref.lock);
+  ref.count[(uint64)r / PGSIZE] = 1;
+  release(&ref.lock); 
+ } 
+ return (void*)r;
+}
+
+void
+kaddref(uint64 pa)
+{
+  acquire(&ref.lock);
+  ref.count[pa / PGSIZE]++;
+  release(&ref.lock);
+}
+
+int
+kgetref(uint64 pa)
+{
+  int n;
+
+  acquire(&ref.lock);
+  n = ref.count[pa / PGSIZE];
+  release(&ref.lock);
+
+  return n;
 }
