@@ -416,6 +416,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
   pte_t *pte;
 
   while(len > 0){
+    if(dstva >= MAXVA)
+      return -1;
     va0 = PGROUNDDOWN(dstva);
 
     // 内核写入不会产生用户态缺页异常，因此在这里主动处理 COW。
