@@ -102,6 +102,39 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+uint32 index;
+
+  acquire(&e1000_lock);
+
+  // TDT 指向网卡希望驱动填入的下一个发送描述符。
+  index = regs[E1000_TDT];
+
+  // DD 没有置位，说明网卡还没有使用完这个描述符。
+  if((tx_ring[index].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // 该描述符之前保存的数据包已经发送完成，现在可以释放。
+  if(tx_mbufs[index] != 0)
+    mbuffree(tx_mbufs[index]);
+
+  // 填写发送描述符。
+  tx_ring[index].addr = (uint64)m->head;
+  tx_ring[index].length = m->len;
+  tx_ring[index].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[index].status = 0;
+
+  // 保存 mbuf，等网卡发送完成后再释放。
+  tx_mbufs[index] = m;
+
+  // 确保描述符内容在通知网卡之前已经写入内存。
+  __sync_synchronize();
+
+  // 通知网卡存在新的发送描述符。
+  regs[E1000_TDT] = (index + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   
   return 0;
 }
@@ -115,6 +148,51 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+while(1){
+    struct mbuf *m;
+    struct mbuf *new_m;
+    uint32 index;
+
+    acquire(&e1000_lock);
+
+    // RDT 指向上次处理完的描述符，
+    // 因此下一个待检查的描述符是 RDT + 1。
+    index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    // DD 没置位，说明当前没有新的接收数据包。
+    if((rx_ring[index].status & E1000_RXD_STAT_DD) == 0){
+      release(&e1000_lock);
+      break;
+    }
+
+    // 先为网卡准备一个新的接收缓冲区。
+    new_m = mbufalloc(0);
+    if(new_m == 0){
+      release(&e1000_lock);
+      break;
+    }
+
+    // 取出网卡刚刚写入的数据包。
+    m = rx_mbufs[index];
+    m->len = rx_ring[index].length;
+
+    // 给该描述符换上新的空缓冲区。
+    rx_mbufs[index] = new_m;
+    rx_ring[index].addr = (uint64)new_m->head;
+    rx_ring[index].status = 0;
+
+    // 确保描述符更新完成后再通知网卡。
+    __sync_synchronize();
+
+    // 告诉网卡这个描述符已经重新可用。
+    regs[E1000_RDT] = index;
+
+    release(&e1000_lock);
+
+    // 必须在释放 E1000 锁之后调用。
+    // net_rx() 处理 ARP 时可能再次调用 e1000_transmit()。
+    net_rx(m);
+  }
 }
 
 void
