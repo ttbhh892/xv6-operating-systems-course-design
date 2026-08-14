@@ -92,6 +92,11 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  int alarm_interval;                // 每隔多少个 tick 执行一次
+  int alarm_ticks;                   // 自上次处理后的 tick 数
+  uint64 alarm_handler;              // 用户态处理函数地址
+  int alarm_active;                  // 当前是否正在执行处理函数
+  struct trapframe alarm_trapframe;  // 原用户寄存器备份
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process
