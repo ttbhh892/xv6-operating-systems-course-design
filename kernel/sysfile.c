@@ -284,6 +284,41 @@ create(char *path, short type, short major, short minor)
 }
 
 uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+  struct inode *ip;
+  int len;
+
+  if(argstr(0, target, MAXPATH) < 0 ||
+     argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径连同结尾的 '\0' 存入符号链接 inode。
+  len = strlen(target) + 1;
+
+  if(writei(ip, 0, (uint64)target, 0, len) != len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+
+  return 0;
+}
+
+uint64
 sys_open(void)
 {
   char path[MAXPATH];
@@ -309,6 +344,38 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+        // 默认跟随符号链接；O_NOFOLLOW 表示打开链接本身。
+    if(!(omode & O_NOFOLLOW)){
+      int depth = 0;
+      char target[MAXPATH];
+
+      while(ip->type == T_SYMLINK){
+        if(depth++ >= 10){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0){
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+
+        // 确保路径字符串一定以 '\0' 结尾。
+        target[MAXPATH - 1] = 0;
+
+        iunlockput(ip);
+
+        if((ip = namei(target)) == 0){
+          end_op();
+          return -1;
+        }
+
+        ilock(ip);
+      }
+    }    
+
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
