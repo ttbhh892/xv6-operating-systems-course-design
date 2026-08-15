@@ -118,6 +118,7 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
+  memset(p->vmas, 0, sizeof(p->vmas));
   p->state = USED;
 
   // Allocate a trapframe page.
@@ -300,7 +301,15 @@ fork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+  // 将父进程的 VMA 元数据复制给子进程。
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
 
+      // 父子进程各持有一个文件引用。
+      np->vmas[i].file = filedup(p->vmas[i].file);
+    }
+  }
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -343,7 +352,16 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+  // 进程退出前解除所有 mmap 映射。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      uint64 addr = p->vmas[i].addr;
+      uint64 length = p->vmas[i].length;
 
+      if(vmaunmap(p, addr, length) < 0)
+        panic("exit: vmaunmap");
+    }
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){

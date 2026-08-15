@@ -5,7 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+#include "fcntl.h"
 struct spinlock tickslock;
 uint ticks;
 
@@ -33,6 +36,80 @@ trapinithart(void)
 // handle an interrupt, exception, or system call from user space.
 // called from trampoline.S
 //
+static int
+mmapfault(struct proc *p, uint64 faultva, uint64 cause)
+{
+  struct vma *v = 0;
+  uint64 va;
+  char *mem;
+  int perm;
+  int n;
+
+  va = PGROUNDDOWN(faultva);
+
+  // 找到覆盖缺页地址的 VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       faultva >= p->vmas[i].addr &&
+       faultva < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  // 读取只允许出现在可读映射中。
+  if(cause == 13 && !(v->prot & PROT_READ))
+    return -1;
+
+  // 写入只允许出现在可写映射中。
+  if(cause == 15 && !(v->prot & PROT_WRITE))
+    return -1;
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  // 文件末尾不足一页的部分保持为 0。
+  memset(mem, 0, PGSIZE);
+
+  ilock(v->file->ip);
+
+  n = readi(v->file->ip,
+            0,
+            (uint64)mem,
+            v->offset + (va - v->addr),
+            PGSIZE);
+
+  iunlock(v->file->ip);
+
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  perm = PTE_U;
+
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE,
+              (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
+
 void
 usertrap(void)
 {
@@ -65,6 +142,9 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if((r_scause() == 13 || r_scause() == 15) &&
+            mmapfault(p, r_stval(), r_scause()) == 0){
+    // mmap 缺页已经处理完成。 
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

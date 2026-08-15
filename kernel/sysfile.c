@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -483,4 +484,204 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+uint64
+sys_mmap(void)
+{
+  uint64 requested_addr;
+  uint64 length;
+  uint64 offset;
+  int prot;
+  int flags;
+  int fd;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *v = 0;
+  uint64 top;
+  uint64 maplen;
+  uint64 mapaddr;
+
+  if(argaddr(0, &requested_addr) < 0 ||
+     argaddr(1, &length) < 0 ||
+     argint(2, &prot) < 0 ||
+     argint(3, &flags) < 0 ||
+     argfd(4, &fd, &f) < 0 ||
+     argaddr(5, &offset) < 0)
+    return -1;
+
+  // 本实验保证 addr 和 offset 为 0。
+  if(requested_addr != 0 || offset != 0 || length == 0)
+    return -1;
+
+  if(f->type != FD_INODE)
+    return -1;
+
+  // 共享可写映射要求文件本身以可写方式打开。
+  if((flags & MAP_SHARED) &&
+     (prot & PROT_WRITE) &&
+     !f->writable)
+    return -1;
+
+  // 找一个空闲 VMA 槽位。
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  /*
+   * 从 TRAPFRAME 下方向低地址分配。
+   * 这样 mmap 区域不会改变 p->sz，也不会干扰普通堆内存。
+   */
+  top = TRAPFRAME;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && p->vmas[i].addr < top)
+      top = p->vmas[i].addr;
+  }
+
+  maplen = PGROUNDUP(length);
+
+  if(top < maplen)
+    return -1;
+
+  mapaddr = PGROUNDDOWN(top - maplen);
+
+  // 防止 mmap 区域与普通用户内存重叠。
+  if(mapaddr < PGROUNDUP(p->sz))
+    return -1;
+
+  v->used = 1;
+  v->addr = mapaddr;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->file = filedup(f);
+  v->offset = offset;
+
+  // 此处不分配物理页，等待访问时触发缺页异常。
+  return mapaddr;
+}
+
+int
+vmaunmap(struct proc *p, uint64 addr, uint64 length)
+{
+  struct vma *v = 0;
+  uint64 start;
+  uint64 end;
+  uint64 vend;
+  uint64 a;
+  uint64 pa;
+  uint64 n;
+
+  if(length == 0)
+    return -1;
+
+  start = PGROUNDDOWN(addr);
+  end = PGROUNDUP(addr + length);
+
+  // 找到包含解除映射范围的 VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used)
+      continue;
+
+    vend = PGROUNDUP(p->vmas[i].addr + p->vmas[i].length);
+
+    if(start >= p->vmas[i].addr && end <= vend){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  vend = PGROUNDUP(v->addr + v->length);
+
+  // 本实验不要求在 VMA 中间打洞。
+  if(start != v->addr && end != vend)
+    return -1;
+
+  for(a = start; a < end; a += PGSIZE){
+        // 惰性分配的页面可能从未访问，因此可能尚未映射。
+    pa = walkaddr(p->pagetable, a);
+    if(pa == 0)
+      continue;
+
+    /*
+     * 本实验允许不检查 PTE 的脏页位。
+     * 对所有实际存在的 MAP_SHARED 页面进行写回。
+     */
+    if(v->flags & MAP_SHARED){
+      n = PGSIZE;
+
+      // 最后一页可能只有一部分属于映射范围。
+      if(a + n > v->addr + v->length)
+        n = v->addr + v->length - a;
+
+      begin_op();
+      ilock(v->file->ip);
+
+      if(writei(v->file->ip,
+                0,
+                pa,
+                v->offset + (a - v->addr),
+                n) != n){
+        iunlock(v->file->ip);
+        end_op();
+        return -1;
+      }
+
+      iunlock(v->file->ip);
+      end_op();
+    }
+
+    // 只解除确实存在的页面，避免 uvmunmap 对空 PTE panic。
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+
+  // 整个 VMA 都被解除。
+  if(start == v->addr && end == vend){
+    fileclose(v->file);
+    v->file = 0;
+    v->used = 0;
+    v->addr = 0;
+    v->length = 0;
+    return 0;
+  }
+
+  // 从 VMA 开头解除一部分。
+  if(start == v->addr){
+    uint64 removed = end - v->addr;
+
+    v->addr = end;
+    v->offset += removed;
+    v->length -= removed;
+    return 0;
+  }
+
+  // 从 VMA 尾部解除一部分。
+  if(end == vend){
+    v->length = start - v->addr;
+    return 0;
+  }
+
+  return -1;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  uint64 length;
+
+  if(argaddr(0, &addr) < 0 ||
+     argaddr(1, &length) < 0)
+    return -1;
+
+  return vmaunmap(myproc(), addr, length);
 }
