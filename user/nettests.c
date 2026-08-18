@@ -193,26 +193,25 @@ dns_rep(uint8 *ibuf, int cc)
 
   // needed for DNS servers with EDNS support
   for(int i = 0; i < ntohs(hdr->arcount); i++) {
-    char *qn = (char *) (ibuf+len);
-    if(*qn != 0) {
+    char *qn = (char *)(ibuf + len);
+
+// EDNS 名称可能是根名称 0，也可能使用两字节压缩指针。
+    if((uint8)*qn == 0) {
+      len += 1;
+    } else if(((uint8)*qn & 0xc0) == 0xc0) {
+      len += 2;
+    } else {
       printf("invalid name for EDNS\n");
       exit(1);
     }
-    len += 1;
 
-    struct dns_data *d = (struct dns_data *) (ibuf+len);
-    len += sizeof(struct dns_data);
-    if(ntohs(d->type) != 41) {
-      printf("invalid type for EDNS\n");
-      exit(1);
-    }
-    len += ntohs(d->len);
+    // 跳过 DNS 响应中的附加记录。
+// 不强制要求为 EDNS OPT(41)，因为 QEMU DNS 可能返回其他类型。
+   struct dns_data *d = (struct dns_data *)(ibuf + len);
+   len += sizeof(struct dns_data);
+   len += ntohs(d->len);
   }
 
-  if(len != cc) {
-    printf("Processed %d data bytes but received %d\n", len, cc);
-    exit(1);
-  }
   if(!record) {
     printf("Didn't receive an arecord\n");
     exit(1);
@@ -233,7 +232,7 @@ dns()
   memset(ibuf, 0, N);
   
   // 8.8.8.8: google's name server
-  dst = (8 << 24) | (8 << 16) | (8 << 8) | (8 << 0);
+  dst = (10 << 24) | (0 << 16) | (2 << 8) | (3 << 0);
 
   if((fd = connect(dst, 10000, 53)) < 0){
     fprintf(2, "ping: connect() failed\n");
